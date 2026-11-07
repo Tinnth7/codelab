@@ -1,60 +1,121 @@
 
 @echo off
-title CodeLab Git Publisher
+title CodeLab Release Manager
 color 0B
 
-:: Switch to the directory containing this BAT file
 cd /d "%~dp0"
 
-echo ============================
-echo       CodeLab Publisher
-echo ============================
+echo =====================================
+echo          CodeLab Release Manager
+echo =====================================
 echo.
 
-:: Verify Git repository
+:: Check Git repository
 if not exist ".git" (
-    echo [ERROR] No Git repository found!
-    echo Make sure this BAT file is inside your CodeLab repository.
+    echo [ERROR] Not a Git repository!
     pause
     exit /b 1
 )
 
-set /p commit_msg="Enter commit message: "
+:: Ask for version
+set /p version="Enter release version (e.g. 0.1.0): "
 
-if "%commit_msg%"=="" (
-    echo Commit message cannot be empty!
+if "%version%"=="" (
+    echo [ERROR] Version cannot be empty!
     pause
     exit /b 1
 )
+
+:: Ask for commit reason
+set /p reason="Enter commit reason: "
+
+if "%reason%"=="" (
+    echo [ERROR] Reason cannot be empty!
+    pause
+    exit /b 1
+)
+
+:: Define paths
+set "SOURCE=%~dp0installer-o\CodeLab.exe"
+set "ARCHIVE=%~dp0archive"
+set "DEST=%~dp0archive\CodeLab-%version%.exe"
 
 echo.
-echo [1/4] Staging changes...
+echo =====================================
+echo           RELEASE SUMMARY
+echo =====================================
+echo Version: %version%
+echo Reason:  %reason%
+echo.
+echo Source:  installer-o\CodeLab.exe
+echo Target:  archive\CodeLab-%version%.exe
+echo =====================================
+echo.
+
+pause
+
+:: Move and rename executable
+echo.
+echo [1/5] Archiving executable...
+
+if not exist "%SOURCE%" (
+    echo [ERROR] CodeLab.exe not found!
+    goto error
+)
+
+if not exist "%ARCHIVE%" mkdir "%ARCHIVE%"
+
+if exist "%DEST%" (
+    echo [ERROR] This version already exists!
+    goto error
+)
+
+move "%SOURCE%" "%DEST%"
+if errorlevel 1 goto error
+
+:: Git staging
+echo.
+echo [2/5] Staging changes...
+
 git add .
 if errorlevel 1 goto error
 
+:: Git commit
 echo.
-echo [2/4] Committing...
-git commit -m "%commit_msg%"
+echo [3/5] Committing...
+
+git commit -m "%reason%"
 if errorlevel 1 goto error
 
+:: Configure buffer
 echo.
-echo [3/4] Configuring Git buffer...
+echo [4/5] Configuring Git...
+
 git config --global http.postBuffer 524288000
 
+:: Push
 echo.
-echo [4/4] Pushing to GitHub...
-git push -u origin main --force-with-lease
+echo [5/5] Publishing to GitHub...
+
+git push -u origin main
 if errorlevel 1 goto error
 
 echo.
-echo ============================
-echo       PUBLISH SUCCESSFUL!
-echo ============================
+echo =====================================
+echo         RELEASE PUBLISHED!
+echo =====================================
+echo Version: CodeLab-%version%.exe
+echo Archived in: archive\
+echo.
 pause
 exit /b 0
 
 :error
 echo.
-echo [ERROR] Git operation failed!
+echo =====================================
+echo             RELEASE FAILED
+echo =====================================
+echo Check the error above.
+echo Your executable may already have been moved.
 pause
 exit /b 1
