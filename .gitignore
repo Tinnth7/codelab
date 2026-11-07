@@ -1,5 +1,4 @@
 /target
-/installer-i/
 /installer-o/
 *.exe
 *.rgba
