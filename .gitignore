@@ -1,4 +1,4 @@
 /target
-/installer-o/
+/installer-i/vc_redist.x64.exe
 *.exe
 *.rgba
