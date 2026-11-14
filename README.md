@@ -33,9 +33,10 @@ CodeLab parses your source code into logical blocks (functions, classes, imports
 | `Ctrl+F` | Find / Search Blocks |
 | `Ctrl+K` | Capture Key Combo (KDL Binds only) |
 
-## Installation (Windows)
+## Installation
 
-You can download the latest installer (`CodeLab-Setup.exe`) from the [Releases page](https://www.github.com/Tinnth7/codelab/releases).
+We support both Windows and Linux!
+You can download the latest version from the [Releases page](https://www.github.com/Tinnth7/codelab/releases) or the [Actions page](https://github.com/Tinnth7/codelab/actions) (Make sure the lastest one has a green check on it)
 
 The installer will:
 1. Install CodeLab to your `Program Files` directory.
