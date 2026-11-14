@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Codelab
+Comment=Block-based code editor
+Exec=codelab %F
+Icon=codelab
+Terminal=false
+Categories=Development;IDE;TextEditor;
+StartupWMClass=codelab
