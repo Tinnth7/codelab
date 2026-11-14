@@ -1,3 +1,5 @@
+#[macro_use]
+mod logger;
 mod block;
 mod capture;
 mod highlight;
@@ -24,6 +26,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+D", "Delete block"),
     ("Ctrl+E", "Toggle disabled"),
     ("Ctrl+F", "Find blocks"),
+    ("Ctrl+`", "Toggle terminal"),
     ("Ctrl+K", "Capture key (KDL binds)"),
 ];
 
@@ -38,19 +41,39 @@ mod icons {
     pub const BAN: &str = "\u{e051}"; // ban
     pub const CIRCLE_CHECK: &str = "\u{e226}"; // circle-check
     pub const KEYBOARD: &str = "\u{e284}"; // keyboard
+    pub const FILES: &str = "\u{e0cf}"; // files
+    pub const GIT_BRANCH: &str = "\u{e0e2}"; // git-branch
+    pub const REFRESH: &str = "\u{e145}"; // refresh-cw
+    pub const X: &str = "\u{e1b2}"; // x
+    pub const TERMINAL: &str = "\u{e181}"; // terminal
 }
 
 fn lucide_family() -> egui::FontFamily {
     egui::FontFamily::Name("lucide".into())
 }
 
+/// Lucide glyphs sit high in their em box, so icons looked ~2px above the label text.
+/// This shifts them down by a fraction of the font size; tweak if it still looks off.
+const ICON_Y_OFFSET: f32 = 0.16;
+
 fn install_icon_font(ctx: &Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "lucide".to_owned(),
-                           egui::FontData::from_static(include_bytes!("../assets/lucide.ttf")).into(),
+        egui::FontData::from_static(include_bytes!("../assets/lucide.ttf"))
+            .tweak(egui::FontTweak { y_offset_factor: ICON_Y_OFFSET, ..Default::default() })
+            .into(),
     );
     fonts.families.insert(lucide_family(), vec!["lucide".to_owned()]);
+
+    // JetBrains Mono goes first in the monospace family (editor, gutter, terminal);
+    // egui's built-in monospace font stays behind it as a glyph fallback.
+    fonts.font_data.insert(
+        "jetbrains-mono".to_owned(),
+        egui::FontData::from_static(include_bytes!("../assets/JetBrainsMono-Regular.ttf")).into(),
+    );
+    fonts.families.entry(egui::FontFamily::Monospace).or_default().insert(0, "jetbrains-mono".to_owned());
+
     ctx.set_fonts(fonts);
 }
 
@@ -62,9 +85,9 @@ fn icon_label(icon: &str, text: &str) -> egui::text::LayoutJob {
         0.0,
         egui::TextFormat {
             font_id: FontId::new(15.0, lucide_family()),
-               color: Color32::PLACEHOLDER,
-               valign: egui::Align::Center,
-               ..Default::default()
+            color: Color32::PLACEHOLDER,
+            valign: egui::Align::Center,
+            ..Default::default()
         },
     );
     if !text.is_empty() {
@@ -73,18 +96,35 @@ fn icon_label(icon: &str, text: &str) -> egui::text::LayoutJob {
             6.0,
             egui::TextFormat {
                 font_id: FontId::proportional(14.0),
-                   color: Color32::PLACEHOLDER,
-                   valign: egui::Align::Center,
-                   ..Default::default()
+                color: Color32::PLACEHOLDER,
+                valign: egui::Align::Center,
+                ..Default::default()
             },
         );
     }
     job
 }
 
+/// Small caps title row used by every panel; `right` fills the right-aligned slot.
+fn panel_header(ui: &mut Ui, title: &str, right: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        ui.set_min_height(26.0);
+        ui.add_space(2.0);
+        ui.label(RichText::new(title).small().strong().color(ui.visuals().weak_text_color()));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), right);
+    });
+    ui.separator();
+}
+
 fn main() -> eframe::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let initial_path = args.get(1).cloned().unwrap_or_default();
+
+    std::panic::set_hook(Box::new(|info| err!("panic: {info}")));
+    info!("Codelab {} starting", env!("CARGO_PKG_VERSION"));
+    if !initial_path.is_empty() {
+        info!("opening {initial_path}");
+    }
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -93,16 +133,21 @@ fn main() -> eframe::Result<()> {
         .with_app_id("codelab")
         .with_icon(egui::IconData {
             rgba: include_bytes!("../assets/icon_256.rgba").to_vec(),
-                   width: 256,
-                   height: 256,
+            width: 256,
+            height: 256,
         }),
         ..Default::default()
     };
-    eframe::run_native(
+    let result = eframe::run_native(
         "Codelab",
         options,
         Box::new(move |cc| Ok(Box::new(Lab::new(cc, initial_path)))),
-    )
+    );
+    match &result {
+        Ok(()) => info!("Codelab exited"),
+        Err(e) => err!("fatal: {e}"),
+    }
+    result
 }
 
 #[derive(Serialize, Deserialize)]
@@ -144,6 +189,10 @@ impl StatusKind {
 #[derive(Copy, Clone)]
 enum CaptureTarget { New, Recapture(usize) }
 
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum SideTab { Explorer, Git }
+
+
 pub struct Lab {
     path: Option<PathBuf>,
     lang: LanguageId,
@@ -181,6 +230,10 @@ pub struct Lab {
     show_confirm_delete: Option<usize>,
     show_about: bool,
     show_shortcuts: bool,
+
+    side_tab: SideTab,
+    side_open: bool,
+    term_open: bool,
 
     hl: Highlighting,
 }
@@ -225,6 +278,9 @@ impl Lab {
             show_confirm_delete: None,
             show_about: false,
             show_shortcuts: false,
+            side_tab: SideTab::Explorer,
+            side_open: true,
+            term_open: false,
             hl: Highlighting::new(),
         };
 
@@ -242,6 +298,9 @@ impl Lab {
         match fs::read_to_string(path) {
             Ok(text) => {
                 self.lang = LanguageId::detect(Path::new(path));
+                if self.lang == LanguageId::Plain {
+                    warn!("no syntax support for {path}; treating it as plain text");
+                }
                 self.source = text;
                 self.path = Some(PathBuf::from(path));
                 self.reparse();
@@ -282,7 +341,13 @@ impl Lab {
     }
 
     fn status(&mut self, msg: impl Into<String>, kind: StatusKind) {
-        self.status_msg = Some(msg.into());
+        let msg = msg.into();
+        match kind {
+            StatusKind::Error => err!("{msg}"),
+            StatusKind::Info | StatusKind::Ok if msg != "Synced" => info!("{msg}"),
+            _ => {}
+        }
+        self.status_msg = Some(msg);
         self.status_kind = kind;
         self.status_until = Some(Instant::now() + Duration::from_secs(6));
     }
@@ -393,7 +458,10 @@ impl Lab {
     }
 
     fn save_as(&mut self) -> bool {
-        let Some(f) = rfd::FileDialog::new().set_title("Save file as").save_file() else { return false; };
+        let Some(f) = rfd::FileDialog::new().set_title("Save file as").save_file() else {
+            info!("save dialog closed without a selection");
+            return false;
+        };
         if self.raw_dirty_since.is_some() {
             self.source = self.raw_buf.clone();
             self.raw_dirty_since = None;
@@ -564,14 +632,16 @@ impl Lab {
             .show();
             if r != rfd::MessageDialogResult::Yes { return; }
         }
-        if let Some(f) = rfd::FileDialog::new().pick_file() {
-            self.load(f.to_str().unwrap_or(""));
+        match rfd::FileDialog::new().pick_file() {
+            Some(f) => self.load(f.to_str().unwrap_or("")),
+            None => info!("file dialog closed without a selection (cancelled, or no file-chooser portal available)"),
         }
     }
 
     fn open_folder_dialog(&mut self) {
-        if let Some(f) = rfd::FileDialog::new().pick_folder() {
-            self.load_folder(f.to_str().unwrap_or(""));
+        match rfd::FileDialog::new().pick_folder() {
+            Some(f) => self.load_folder(f.to_str().unwrap_or("")),
+            None => info!("folder dialog closed without a selection (cancelled, or no file-chooser portal available)"),
         }
     }
 
@@ -600,15 +670,90 @@ impl Lab {
                     }
                 }
             }
-            ui.separator();
-
-            let search_width = (ui.available_width() - 400.0).max(180.0);
-            ui.add_sized([search_width, 22.0], TextEdit::singleline(&mut self.search).id(egui::Id::new("block_search")).hint_text("Search blocks…"));
-            ui.checkbox(&mut self.hide_c, "Hide comments");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let term_btn = egui::Button::new(icon_label(icons::TERMINAL, "Terminal")).selected(self.term_open);
+                if ui.add(term_btn).on_hover_text("Toggle terminal (Ctrl+`)").clicked() {
+                    self.toggle_terminal(ui.ctx());
+                }
+                ui.checkbox(&mut self.hide_c, "Hide comments");
+            });
         });
     }
 
-    fn sidebar(&mut self, ui: &mut Ui) {
+    // ---------- activity bar + side panels ----------
+
+    fn activity_bar(&mut self, ui: &mut Ui) {
+        ui.add_space(6.0);
+        let tabs = [
+            (SideTab::Explorer, icons::FILES, "Explorer"),
+            (SideTab::Git, icons::GIT_BRANCH, "Source Control"),
+        ];
+        for (tab, icon, tip) in tabs {
+            let active = self.side_open && self.side_tab == tab;
+            let (rect, resp) = ui.allocate_exact_size(egui::vec2(44.0, 44.0), egui::Sense::click());
+            let v = ui.visuals();
+            let color = if active { v.strong_text_color() } else if resp.hovered() { v.text_color() } else { v.weak_text_color() };
+            let accent = v.hyperlink_color;
+            let hover_bg = v.widgets.hovered.weak_bg_fill;
+            let painter = ui.painter();
+            if resp.hovered() && !active {
+                painter.rect_filled(rect.shrink2(egui::vec2(5.0, 3.0)), 6.0, hover_bg);
+            }
+            if active {
+                painter.rect_filled(egui::Rect::from_min_size(rect.left_top(), egui::vec2(2.5, rect.height())), 0.0, accent);
+            }
+            painter.text(rect.center(), egui::Align2::CENTER_CENTER, icon, FontId::new(21.0, lucide_family()), color);
+            if resp.on_hover_text(tip).clicked() {
+                if self.side_tab == tab {
+                    self.side_open = !self.side_open;
+                } else {
+                    self.side_tab = tab;
+                    self.side_open = true;
+                }
+            }
+        }
+    }
+
+    fn explorer_panel(&mut self, ui: &mut Ui) {
+        panel_header(ui, "EXPLORER", |ui| {
+            let btn = egui::Button::new(icon_label(icons::REFRESH, "")).frame(false);
+            ui.add_enabled(false, btn);
+        });
+        if let Some(root) = &self.explorer_root {
+            ui.label(RichText::new(root.file_name().unwrap_or_default().to_string_lossy()).strong());
+        }
+
+        let mut to_load: Option<PathBuf> = None;
+        ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+            if self.explorer_tree.is_empty() {
+                ui.label(RichText::new("No folder open").weak());
+                ui.label(RichText::new("File \u{2192} Open Folder\u{2026}").weak());
+                return;
+            }
+            ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+                draw_tree(ui, &self.explorer_tree, self.path.as_deref(), &mut to_load, 0);
+            });
+        });
+        if let Some(p) = to_load {
+            self.load(p.to_str().unwrap_or(""));
+        }
+    }
+
+    fn git_panel(&mut self, ui: &mut Ui) {
+        panel_header(ui, "SOURCE CONTROL", |ui| {
+            let btn = egui::Button::new(icon_label(icons::REFRESH, "")).frame(false);
+            ui.add_enabled(false, btn);
+        });
+        ui.add_space(48.0);
+        ui.vertical_centered(|ui| {
+            ui.label(RichText::new(icons::GIT_BRANCH).font(FontId::new(40.0, lucide_family())).weak());
+            ui.add_space(10.0);
+            ui.label(RichText::new("Nothing here yet").strong());
+            ui.label(RichText::new("Git support is coming soon.").weak());
+        });
+    }
+
+    fn blocks_panel(&mut self, ui: &mut Ui) {
         let mut counts: std::collections::HashMap<String, usize> = Default::default();
         let mut total = 0usize;
         for b in &self.blocks {
@@ -616,29 +761,58 @@ impl Lab {
             *counts.entry(b.group.clone()).or_insert(0) += 1;
             total += 1;
         }
+        let lang_groups = self.lang.groups();
 
-        ScrollArea::vertical().show(ui, |ui| {
-            if ui.selectable_label(self.cur == "All", format!("All  ({total})")).clicked() {
-                self.cur = "All".into();
-            }
-            let lang_groups = self.lang.groups();
-            for g in lang_groups {
-                if let Some(&n) = counts.get(*g) {
-                    let label = format!("{g}  ({n})");
-                    if ui.selectable_label(self.cur == *g, label).clicked() {
-                        self.cur = g.to_string();
+        panel_header(ui, "CODE BLOCKS", |ui| {
+            let shown = if self.cur == "All" {
+                format!("All ({total})")
+            } else {
+                format!("{} ({})", self.cur, counts.get(&self.cur).copied().unwrap_or(0))
+            };
+            egui::ComboBox::new("group_filter", "")
+                .selected_text(shown)
+                .width(160.0)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.cur, "All".to_string(), format!("All ({total})"));
+                    for g in lang_groups {
+                        if let Some(&n) = counts.get(*g) {
+                            ui.selectable_value(&mut self.cur, g.to_string(), format!("{g} ({n})"));
+                        }
                     }
-                }
-            }
-            for g in ["Misc", "Errors"] {
-                if lang_groups.contains(&g) { continue; }
-                if let Some(&n) = counts.get(g) {
-                    let label = format!("{g}  ({n})");
-                    if ui.selectable_label(self.cur == g, label).clicked() {
-                        self.cur = g.to_string();
+                    for g in ["Misc", "Errors"] {
+                        if lang_groups.contains(&g) { continue; }
+                        if let Some(&n) = counts.get(g) {
+                            ui.selectable_value(&mut self.cur, g.to_string(), format!("{g} ({n})"));
+                        }
                     }
-                }
+                });
+        });
+
+        ui.add(
+            TextEdit::singleline(&mut self.search)
+                .id(egui::Id::new("block_search"))
+                .hint_text("Search blocks…")
+                .desired_width(f32::INFINITY),
+        );
+        ui.add_space(4.0);
+        self.tree(ui);
+    }
+
+    // ---------- terminal (layout only for now) ----------
+
+    fn toggle_terminal(&mut self, _ctx: &Context) {
+        self.term_open = !self.term_open;
+    }
+
+    fn terminal_panel(&mut self, ui: &mut Ui) {
+        panel_header(ui, "TERMINAL", |ui| {
+            let close = egui::Button::new(icon_label(icons::X, "")).frame(false);
+            if ui.add(close).on_hover_text("Close terminal (Ctrl+`)").clicked() {
+                self.term_open = false;
             }
+        });
+        ui.centered_and_justified(|ui| {
+            ui.label(RichText::new("Terminal \u{2014} coming soon").weak());
         });
     }
 
@@ -898,6 +1072,7 @@ impl Lab {
         let (ctrl_f, shift) = ctx.input(|i| (i.modifiers.command && i.key_pressed(Key::F), i.modifiers.shift));
         if ctrl_s { if shift { self.save_as(); } else { self.save(); } }
         if ctrl_f { ctx.memory_mut(|m| m.request_focus(egui::Id::new("block_search"))); }
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::Backtick)) { self.toggle_terminal(ctx); }
         if ctrl_o { self.open_dialog(); }
         if ctrl_n { self.new_block(); }
         if ctrl_d { if let Some(i) = self.sel { self.show_confirm_delete = Some(i); } }
@@ -911,39 +1086,39 @@ impl Lab {
 
     fn draw_help_windows(&mut self, ctx: &Context) {
         egui::Window::new("About Codelab")
-        .open(&mut self.show_about)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-            ui.set_min_width(320.0);
-            ui.vertical_centered(|ui| {
-                ui.add_space(6.0);
-                ui.label(RichText::new("Codelab").size(26.0).strong());
-                ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).weak());
-                ui.add_space(8.0);
-                ui.label("A block-based code editor written in Rust.");
-                ui.label(RichText::new("Built with egui, tree-sitter and syntect.").weak());
-                ui.add_space(8.0);
-                ui.hyperlink_to("github.com/Tinnth7/codelab", REPO_URL);
-                ui.add_space(6.0);
+            .open(&mut self.show_about)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_min_width(320.0);
+                ui.vertical_centered(|ui| {
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("Codelab").size(26.0).strong());
+                    ui.label(RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION"))).weak());
+                    ui.add_space(8.0);
+                    ui.label("A block-based code editor written in Rust.");
+                    ui.label(RichText::new("Built with egui, tree-sitter and syntect.").weak());
+                    ui.add_space(8.0);
+                    ui.hyperlink_to("github.com/Tinnth7/codelab", REPO_URL);
+                    ui.add_space(6.0);
+                });
             });
-        });
 
         egui::Window::new("Keyboard Shortcuts")
-        .open(&mut self.show_shortcuts)
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .show(ctx, |ui| {
-            egui::Grid::new("shortcuts_grid").num_columns(2).spacing([24.0, 6.0]).show(ui, |ui| {
-                for (keys, what) in SHORTCUTS {
-                    ui.label(RichText::new(*keys).monospace().strong());
-                    ui.label(*what);
-                    ui.end_row();
-                }
+            .open(&mut self.show_shortcuts)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                egui::Grid::new("shortcuts_grid").num_columns(2).spacing([24.0, 6.0]).show(ui, |ui| {
+                    for (keys, what) in SHORTCUTS {
+                        ui.label(RichText::new(*keys).monospace().strong());
+                        ui.label(*what);
+                        ui.end_row();
+                    }
+                });
             });
-        });
     }
 
     fn draw_capture_dialog(&mut self, ctx: &Context) {
@@ -1006,7 +1181,7 @@ fn draw_gutter(ui: &mut Ui, count: usize, row_height: f32, numbers: Option<&[usi
     let weak = ui.visuals().weak_text_color();
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(width, row_height * count as f32),
-                                           egui::Sense::hover(),
+        egui::Sense::hover(),
     );
     let painter = ui.painter_at(rect);
 
@@ -1021,10 +1196,10 @@ fn draw_gutter(ui: &mut Ui, count: usize, row_height: f32, numbers: Option<&[usi
         let label = numbers.and_then(|n| n.get(i).copied()).unwrap_or(i + 1);
         painter.text(
             rect.left_top() + egui::vec2(width - 4.0, row_height * i as f32),
-                     egui::Align2::RIGHT_TOP,
-                     label.to_string(),
-                     FontId::monospace(13.0),
-                     weak,
+            egui::Align2::RIGHT_TOP,
+            label.to_string(),
+            FontId::monospace(13.0),
+            weak,
         );
     }
 }
@@ -1038,7 +1213,7 @@ struct FileNode {
 
 const EXPLORER_EXTS: &[&str] = &[
     "py", "cpp", "cc", "cxx", "c", "h", "hpp", "hh", "hxx", "js", "mjs", "jsx", "ts", "tsx",
-"rs", "kdl", "txt", "toml", "md", "json", "yaml", "yml",
+    "rs", "kdl", "txt", "toml", "md", "json", "yaml", "yml",
 ];
 
 /// Folders first, then files, both alphabetical. Empty folders are dropped.
@@ -1101,8 +1276,8 @@ fn draw_tree(ui: &mut Ui, nodes: &[FileNode], current: Option<&Path>, to_load: &
                 let has_current = current.map_or(false, |c| c.starts_with(&node.path));
                 ui.push_id(&node.path, |ui| {
                     egui::CollapsingHeader::new(RichText::new(&node.name).strong())
-                    .default_open(depth == 0 || has_current)
-                    .show(ui, |ui| draw_tree(ui, children, current, to_load, depth + 1));
+                        .default_open(depth == 0 || has_current)
+                        .show(ui, |ui| draw_tree(ui, children, current, to_load, depth + 1));
                 });
             }
             None => {
@@ -1111,16 +1286,16 @@ fn draw_tree(ui: &mut Ui, nodes: &[FileNode], current: Option<&Path>, to_load: &
                 let mut job = egui::text::LayoutJob::default();
                 job.append(
                     &format!("{:<2}", glyph),
-                           0.0,
-                           egui::TextFormat { font_id: FontId::monospace(12.0), color, ..Default::default() },
+                    0.0,
+                    egui::TextFormat { font_id: FontId::monospace(12.0), color, ..Default::default() },
                 );
                 job.append(
                     &node.name,
                     6.0,
                     egui::TextFormat {
                         font_id: FontId::proportional(14.0),
-                           color: ui.visuals().text_color(),
-                           ..Default::default()
+                        color: ui.visuals().text_color(),
+                        ..Default::default()
                     },
                 );
                 if ui.selectable_label(selected, job).clicked() {
@@ -1171,6 +1346,9 @@ impl eframe::App for Lab {
                     }
                     ui.checkbox(&mut self.hide_c, "Hide Comments");
                     ui.checkbox(&mut self.autosave, "Autosave (every 5 min)");
+                    ui.separator();
+                    ui.checkbox(&mut self.side_open, "Side Bar");
+                    if ui.add(egui::Button::new("Terminal").shortcut_text("Ctrl+`")).clicked() { self.toggle_terminal(ctx); ui.close_menu(); }
                 });
                 ui.menu_button("Help", |ui| {
                     if ui.button("Keyboard Shortcuts").clicked() { self.show_shortcuts = true; ui.close_menu(); }
@@ -1188,46 +1366,38 @@ impl eframe::App for Lab {
         // Status bar
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| self.status_bar(ui));
 
-        // Layout: File Explorer => Groups => Blocks => Editor
-        egui::SidePanel::left("explorer")
-        .resizable(true)
-        .default_width(220.0)
-        .min_width(150.0)
-        .show(ctx, |ui| {
-            ui.heading("Explorer");
-            ui.separator();
-            if let Some(root) = &self.explorer_root {
-                ui.label(RichText::new(root.file_name().unwrap_or_default().to_string_lossy()).strong());
-            }
+        // Layout: activity bar | side tab content | code blocks | editor (+ terminal below it)
+        egui::SidePanel::left("activity")
+        .exact_width(44.0)
+        .resizable(false)
+        .show_separator_line(false)
+        .frame(egui::Frame::none().fill(ctx.style().visuals.extreme_bg_color))
+        .show(ctx, |ui| self.activity_bar(ui));
 
-            let mut to_load: Option<PathBuf> = None;
-            ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-                if self.explorer_tree.is_empty() {
-                    ui.label(RichText::new("No folder open").weak());
-                    ui.label(RichText::new("File \u{2192} Open Folder\u{2026}").weak());
-                    return;
-                }
-                ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
-                    draw_tree(ui, &self.explorer_tree, self.path.as_deref(), &mut to_load, 0);
-                });
+        if self.side_open {
+            egui::SidePanel::left("side")
+            .resizable(true)
+            .default_width(240.0)
+            .min_width(160.0)
+            .show(ctx, |ui| match self.side_tab {
+                SideTab::Explorer => self.explorer_panel(ui),
+                SideTab::Git => self.git_panel(ui),
             });
+        }
 
-            if let Some(p) = to_load {
-                self.load(p.to_str().unwrap_or(""));
-            }
-        });
-
-        egui::SidePanel::left("groups")
+        egui::SidePanel::left("blocks")
         .resizable(true)
-        .default_width(180.0)
-        .min_width(120.0)
-        .show(ctx, |ui| self.sidebar(ui));
+        .default_width(400.0)
+        .min_width(260.0)
+        .show(ctx, |ui| self.blocks_panel(ui));
 
-        egui::SidePanel::left("tree")
-        .resizable(true)
-        .default_width(380.0)
-        .min_width(250.0)
-        .show(ctx, |ui| self.tree(ui));
+        if self.term_open {
+            egui::TopBottomPanel::bottom("terminal")
+            .resizable(true)
+            .default_height(200.0)
+            .min_height(100.0)
+            .show(ctx, |ui| self.terminal_panel(ui));
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| self.editor_pane(ui, ctx));
 

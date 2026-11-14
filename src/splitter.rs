@@ -41,9 +41,13 @@ fn split_tree_sitter(source: &str, lang: LanguageId) -> Vec<Block> {
     let Some(ts_lang) = lang.ts_language() else { return split_plain(source) };
     let mut parser = tree_sitter::Parser::new();
     if parser.set_language(&ts_lang).is_err() {
+        warn!("tree-sitter grammar for {} failed to load; using plain-text blocks", lang.name());
         return split_plain(source);
     }
-    let Some(tree) = parser.parse(source, None) else { return split_plain(source) };
+    let Some(tree) = parser.parse(source, None) else {
+        warn!("tree-sitter could not parse {}; using plain-text blocks", lang.name());
+        return split_plain(source);
+    };
     let root = tree.root_node();
     let bytes = source.as_bytes();
     let mut blocks = Vec::new();

@@ -4,9 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-eframe = { version = "0.28", default-features = false, features = ["glow", "default_fonts", "persistence"] }
+eframe = { version = "0.28", default-features = false, features = ["glow", "default_fonts", "persistence", "wayland", "x11"] }
 egui = "0.28"
-rfd = "0.14"
 directories = "5.0"
 chrono = "0.4"
 anyhow = "1"
@@ -22,3 +21,19 @@ tree-sitter-typescript = "0.21"
 tree-sitter-rust = "0.21"
 
 syntect = { version = "5.2", default-features = false, features = ["default-fancy"] }
+
+# File dialogs: XDG portal on Linux (works on niri/Wayland), native Win32/macOS dialogs elsewhere.
+# Keep rfd's default features on Windows: it needs "common-controls-v6" for message dialogs.
+[target.'cfg(target_os = "linux")'.dependencies]
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+rfd = "0.15"
+
+# Embeds assets/icon.ico into Codelab.exe (see build.rs)
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+lto = "thin"
+strip = true
