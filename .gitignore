@@ -3,3 +3,5 @@
 *.exe
 *.rgbatarget/
 installer-o/
+target/
+installer-o/
