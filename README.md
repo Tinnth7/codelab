@@ -1,5 +1,5 @@
 <p align="center">
-  <img width="256" height="256" alt="icon" src="https://github.com/user-attachments/assets/7846ee76-07cc-4387-be49-2b942aed53d4" />
+<img width="512" height="512" alt="icon" src="https://github.com/user-attachments/assets/1dd6d14a-6375-4504-b781-aef23f1a2b51" />
 </p>
 
 <h1 align="center">CodeLab</h1>
